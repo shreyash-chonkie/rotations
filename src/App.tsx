@@ -827,6 +827,16 @@ function App() {
                   <RotateCcw size={18} />
                   Restart
                 </button>
+                {result.scored && level ? (
+                  <button
+                    className="primary-action"
+                    onClick={() => loadLevel(level, sequence)}
+                    disabled={loadingLevel}
+                  >
+                    <CircleDot size={18} />
+                    Next Level
+                  </button>
+                ) : null}
                 {!result.scored ? (
                   <button
                     className="primary-action"
