@@ -18,18 +18,30 @@ npm run dev
 
 The frontend runs on `http://localhost:5173` and the local API runs on `http://localhost:5174`.
 
-## Local model
+## Model provider
 
-The API calls Ollama at `http://localhost:11434` and defaults to the instruction-tuned model:
-
-```sh
-google/gemma-4-E4B-it
-```
-
-You can override the local runtime or model tag:
+The API calls OpenRouter and defaults to:
 
 ```sh
-OLLAMA_URL=http://localhost:11434 OLLAMA_MODEL=google/gemma-4-E4B-it npm run dev
+nvidia/nemotron-3-nano-30b-a3b:free
 ```
 
-If the model is unavailable, the game uses a deterministic fallback level so the UI remains playable.
+Set your OpenRouter API key before running the app:
+
+```sh
+OPENROUTER_API_KEY=your_key_here npm run dev
+```
+
+Or create a local `.env` file:
+
+```sh
+OPENROUTER_API_KEY=your_key_here
+```
+
+You can override the endpoint or model:
+
+```sh
+OPENROUTER_URL=https://openrouter.ai/api/v1/chat/completions OPENROUTER_MODEL=nvidia/nemotron-3-nano-30b-a3b:free npm run dev
+```
+
+If the API key or model is unavailable, the game uses a deterministic fallback level so the UI remains playable.

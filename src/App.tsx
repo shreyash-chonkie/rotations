@@ -1,12 +1,16 @@
 import {
   CircleDot,
+  Copy,
+  MessageCircle,
   MoveRight,
   Play,
   RotateCcw,
+  Send,
+  Share2,
   StepBack,
   Target,
 } from "lucide-react";
-import { MouseEvent, useMemo, useRef, useState } from "react";
+import { MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type Team = "home" | "away";
 
@@ -48,6 +52,7 @@ type PassStep = {
   toPlayerId: string;
   from: Point;
   to: Point;
+  kind?: "ground" | "lofted";
 };
 
 type ShotStep = {
@@ -59,10 +64,28 @@ type ShotStep = {
 
 type Step = MoveStep | PassStep | ShotStep;
 
+type ActiveRun = {
+  playerId: string;
+  from: Point;
+  to: Point;
+  startTime: number;
+  duration: number;
+};
+
+type RunTackle = {
+  runnerId: string;
+  defender: Player;
+  point: Point;
+  time: number;
+};
+
 type LevelResponse = {
   level: Level;
-  source: "ollama" | "fallback";
+  source: "openrouter" | "fallback";
   model: string;
+  modelName?: string;
+  durationMs?: number;
+  buffered?: boolean;
   warning?: string;
 };
 
@@ -71,6 +94,13 @@ type PendingAction =
   | { type: "pass"; fromPlayerId: string };
 
 const goalPoint = { x: 98, y: 50 };
+const movementStartDelay = 0.28;
+const groundPassSpeed = 70;
+const loftedPassSpeed = 43;
+const shotSpeed = 82;
+const playerRunSpeed = 21;
+const receiveControlRadius = 3.8;
+const shareUrl = "https://playrotations.com";
 
 function App() {
   const [level, setLevel] = useState<Level | null>(null);
@@ -88,9 +118,13 @@ function App() {
     scored: boolean;
     reason: string;
   } | null>(null);
+  const [generationStatus, setGenerationStatus] = useState("");
   const [loadingLevel, setLoadingLevel] = useState(false);
   const [activeDefenderId, setActiveDefenderId] = useState<string | null>(null);
+  const [score, setScore] = useState(0);
+  const [shareOpen, setShareOpen] = useState(false);
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const solvedLevelIds = useRef<Set<string>>(new Set());
 
   const visiblePlayers = playbackPlayers ?? players;
   const ballCarrier = visiblePlayers.find(
@@ -104,9 +138,12 @@ function App() {
 
   const arrows = useMemo(
     () =>
-      sequence.filter(
-        (step) => step.type === "pass" || step.type === "shot",
-      ) as Array<PassStep | ShotStep>,
+      sequence
+        .map((step, index) => ({ step, index }))
+        .filter(
+          (entry): entry is { step: PassStep | ShotStep; index: number } =>
+            entry.step.type === "pass" || entry.step.type === "shot",
+        ),
     [sequence],
   );
   const movementArrows = useMemo(
@@ -114,9 +151,14 @@ function App() {
     [sequence],
   );
 
+  useEffect(() => {
+    void loadLevel();
+  }, []);
+
   async function loadLevel(previousLevel?: Level, solution?: Step[]) {
     setLoadingLevel(true);
     setResult(null);
+    setShareOpen(false);
     setSelectedPlayerId(null);
     setActiveDefenderId(null);
     setPendingAction(null);
@@ -133,9 +175,24 @@ function App() {
       setPlayers(nextLevel.players);
       setBallCarrierId(nextLevel.ballCarrierId);
       setSequence([]);
+      setGenerationStatus(generationStatusText(data));
     } finally {
       setLoadingLevel(false);
     }
+  }
+
+  function startNewGame() {
+    setScore(0);
+    solvedLevelIds.current.clear();
+    void loadLevel();
+  }
+
+  function shareText() {
+    return `I got through ${score} defences. ${shareUrl}`;
+  }
+
+  async function copyShareText() {
+    await navigator.clipboard?.writeText(shareText());
   }
 
   function rebuildFromSequence(nextSequence: Step[], clearResult = true) {
@@ -157,6 +214,13 @@ function App() {
         }
       }
       if (step.type === "pass") {
+        const receiver = rebuiltPlayers.find(
+          (candidate) => candidate.id === step.toPlayerId,
+        );
+        if (receiver && step.kind === "lofted") {
+          receiver.x = step.to.x;
+          receiver.y = step.to.y;
+        }
         rebuiltBallCarrier = step.toPlayerId;
       }
     }
@@ -178,6 +242,7 @@ function App() {
     setSelectedPlayerId(null);
     setActiveDefenderId(null);
     setPendingAction(null);
+    setShareOpen(false);
   }
 
   function getClientPoint(clientX: number, clientY: number): Point {
@@ -251,6 +316,15 @@ function App() {
     }
 
     setActiveDefenderId(null);
+    if (
+      pendingAction?.type === "move" &&
+      pendingAction.playerId === player.id
+    ) {
+      setSelectedPlayerId(null);
+      setPendingAction(null);
+      return;
+    }
+
     if (pendingAction?.type === "pass") {
       addPass(pendingAction.fromPlayerId, player.id);
       return;
@@ -281,6 +355,7 @@ function App() {
         toPlayerId: receiver.id,
         from: { x: passer.x, y: passer.y },
         to: { x: receiver.x, y: receiver.y },
+        kind: "ground",
       },
     ]);
     setBallCarrierId(receiver.id);
@@ -293,9 +368,31 @@ function App() {
       return;
     }
 
-    setSelectedPlayerId(ballCarrier.id);
+    if (pendingAction?.type === "pass") {
+      setPendingAction(null);
+      setSelectedPlayerId(null);
+      return;
+    }
+
+    setSelectedPlayerId(null);
     setPendingAction({ type: "pass", fromPlayerId: ballCarrier.id });
     setActiveDefenderId(null);
+    setResult(null);
+    setShareOpen(false);
+  }
+
+  function toggleLoftedPass(stepIndex: number) {
+    setSequence((current) =>
+      current.map((step, index) => {
+        if (index !== stepIndex || step.type !== "pass") {
+          return step;
+        }
+        return {
+          ...step,
+          kind: step.kind === "lofted" ? "ground" : "lofted",
+        };
+      }),
+    );
     setResult(null);
   }
 
@@ -337,59 +434,210 @@ function App() {
 
     let animatedPlayers = level.players.map((player) => ({ ...player }));
     let animatedBallCarrier = level.ballCarrierId;
+    let timelineTime = 0;
+    const activeRuns: ActiveRun[] = [];
+    const executedSequence: Step[] = [];
     setPlaybackPlayers(animatedPlayers);
     setBallCarrierId(animatedBallCarrier);
     setPlaybackBall(null);
 
-    for (const step of sequence) {
+    const stopForTackle = async (tackle: RunTackle, fromTime: number) => {
+      await animate((progress) => {
+        const displayTime = lerp(fromTime, tackle.time, progress);
+        setPlaybackPlayers(playersAtTime(animatedPlayers, activeRuns, displayTime));
+      }, secondsToMs(Math.max(tackle.time - fromTime, 0.2)));
+      const runnerName = nameFor(tackle.runnerId, animatedPlayers);
+          setActiveStep(null);
+          setShareOpen(false);
+          setResult({
+            scored: false,
+            reason: `${tackle.defender.name} stepped in and stopped ${runnerName}'s run with a ${Math.round(defenderComposite(tackle.defender))} defensive score.`,
+      });
+      setPlaybackPlayers(null);
+      setPlaybackBall(null);
+      rebuildFromSequence(sequence, false);
+    };
+
+    for (let stepIndex = 0; stepIndex < sequence.length; stepIndex += 1) {
+      const step = sequence[stepIndex];
       setActiveStep(step);
 
       if (step.type === "move") {
-        await animate((progress) => {
-          setPlaybackPlayers(
-            animatedPlayers.map((player) =>
-              player.id === step.playerId
-                ? {
-                    ...player,
-                    x: lerp(step.from.x, step.to.x, progress),
-                    y: lerp(step.from.y, step.to.y, progress),
-                  }
-                : player,
-            ),
-          );
-        });
-        animatedPlayers = animatedPlayers.map((player) =>
-          player.id === step.playerId
-            ? { ...player, x: step.to.x, y: step.to.y }
-            : player,
+        const currentPlayerPosition = playerPositionAt(
+          step.playerId,
+          animatedPlayers,
+          activeRuns,
+          timelineTime,
         );
+        const run = {
+          playerId: step.playerId,
+          from: currentPlayerPosition,
+          to: step.to,
+          startTime: timelineTime,
+          duration: movementDuration(currentPlayerPosition, step.to),
+        };
+        activeRuns.push(run);
+        executedSequence.push({ ...step, from: currentPlayerPosition });
+
+        const movementEndTime = timelineTime + movementStartDelay;
+        const movementTackle = findRunTackle(
+          activeRuns,
+          animatedPlayers,
+          timelineTime,
+          movementEndTime,
+        );
+        if (movementTackle) {
+          await stopForTackle(movementTackle, timelineTime);
+          return;
+        }
+
+        await animate((progress) => {
+          const displayTime = lerp(
+            timelineTime,
+            movementEndTime,
+            progress,
+          );
+          setPlaybackPlayers(playersAtTime(animatedPlayers, activeRuns, displayTime));
+        }, secondsToMs(movementStartDelay));
+        timelineTime = movementEndTime;
+        animatedPlayers = playersAtTime(animatedPlayers, activeRuns, timelineTime);
         setPlaybackPlayers(animatedPlayers);
+        settleCompletedRuns(activeRuns, timelineTime);
       }
 
       if (step.type === "pass") {
-        await animate((progress) => {
-          setPlaybackBall({
-            x: lerp(step.from.x, step.to.x, progress),
-            y: lerp(step.from.y, step.to.y, progress),
+        const passStart = playerPositionAt(
+          step.fromPlayerId,
+          animatedPlayers,
+          activeRuns,
+          timelineTime,
+        );
+        const receiverArrival = playerPositionAt(
+          step.toPlayerId,
+          animatedPlayers,
+          activeRuns,
+          timelineTime + passDuration({ ...step, from: passStart }),
+        );
+        const receiverLateBy = distance(receiverArrival, step.to);
+
+        const receiver = animatedPlayers.find(
+          (player) => player.id === step.toPlayerId,
+        );
+        const timedStep = { ...step, from: passStart };
+        const timedPassDuration = passDuration(timedStep);
+        const passEndTime = timelineTime + timedPassDuration;
+        const interception = findPassInterception(timedStep, animatedPlayers);
+        const passTackle = findRunTackle(
+          activeRuns,
+          animatedPlayers,
+          timelineTime,
+          passEndTime,
+        );
+        const interceptionTime = interception
+          ? timelineTime + timedPassDuration * interception.progress
+          : Infinity;
+        if (passTackle && passTackle.time <= interceptionTime) {
+          await stopForTackle(passTackle, timelineTime);
+          return;
+        }
+
+        if (interception) {
+          await animate((progress) => {
+            const displayTime = lerp(
+              timelineTime,
+              timelineTime + timedPassDuration * interception.progress,
+              progress,
+            );
+            setPlaybackBall({
+              x: lerp(passStart.x, interception.point.x, progress),
+              y: lerp(passStart.y, interception.point.y, progress),
+            });
+            setPlaybackPlayers(playersAtTime(animatedPlayers, activeRuns, displayTime));
+          }, 460);
+          setActiveStep(null);
+          setShareOpen(false);
+          setResult({
+            scored: false,
+            reason: `${interception.player.name} intercepted the ${step.kind === "lofted" ? "lobbed " : ""}pass with a ${Math.round(defenderComposite(interception.player))} defensive score.`,
           });
-        }, 560);
+          setPlaybackPlayers(null);
+          setPlaybackBall(null);
+          rebuildFromSequence(sequence, false);
+          return;
+        }
+
+        await animate((progress) => {
+          const displayTime = lerp(
+            timelineTime,
+            passEndTime,
+            progress,
+          );
+          const nextBall = loftedPoint(passStart, step.to, progress, step.kind);
+          setPlaybackBall({
+            x: nextBall.x,
+            y: nextBall.y,
+          });
+          setPlaybackPlayers(playersAtTime(animatedPlayers, activeRuns, displayTime));
+        }, secondsToMs(timedPassDuration));
+        timelineTime = passEndTime;
+        animatedPlayers = playersAtTime(animatedPlayers, activeRuns, timelineTime);
+        settleCompletedRuns(activeRuns, timelineTime);
+
+        if (!receiver || receiverLateBy > receiveControlRadius) {
+          setActiveStep(null);
+          setShareOpen(false);
+          setResult({
+            scored: false,
+            reason: `${nameFor(step.toPlayerId, animatedPlayers)} could not arrive in time for the ${step.kind === "lofted" ? "lobbed " : ""}pass.`,
+          });
+          setPlaybackPlayers(null);
+          setPlaybackBall(null);
+          rebuildFromSequence(sequence, false);
+          return;
+        }
+
+        animatedPlayers = animatedPlayers.map((player) =>
+          player.id === step.toPlayerId ? { ...player, x: step.to.x, y: step.to.y } : player,
+        );
+        executedSequence.push(timedStep);
         animatedBallCarrier = step.toPlayerId;
         setBallCarrierId(animatedBallCarrier);
         setPlaybackBall(null);
+        setPlaybackPlayers(animatedPlayers);
       }
 
       if (step.type === "shot") {
+        const shotStart = playerPositionAt(
+          step.fromPlayerId,
+          animatedPlayers,
+          activeRuns,
+          timelineTime,
+        );
+        const timedStep = { ...step, from: shotStart };
+        const duration = distance(shotStart, step.to) / shotSpeed;
         await animate((progress) => {
+          const displayTime = lerp(timelineTime, timelineTime + duration, progress);
           setPlaybackBall({
-            x: lerp(step.from.x, step.to.x, progress),
-            y: lerp(step.from.y, step.to.y, progress),
+            x: lerp(shotStart.x, step.to.x, progress),
+            y: lerp(shotStart.y, step.to.y, progress),
           });
-        }, 700);
+          setPlaybackPlayers(playersAtTime(animatedPlayers, activeRuns, displayTime));
+        }, secondsToMs(duration));
+        timelineTime += duration;
+        animatedPlayers = playersAtTime(animatedPlayers, activeRuns, timelineTime);
+        settleCompletedRuns(activeRuns, timelineTime);
+        executedSequence.push(timedStep);
+        setActiveStep(timedStep);
       }
     }
 
     setActiveStep(null);
-    const evaluation = evaluateSequence(sequence, animatedPlayers);
+    const evaluation = evaluateSequence(executedSequence, animatedPlayers);
+    if (evaluation.scored && level && !solvedLevelIds.current.has(level.id)) {
+      solvedLevelIds.current.add(level.id);
+      setScore((current) => current + 1);
+    }
+    setShareOpen(false);
     setResult(evaluation);
     setPlaybackPlayers(null);
     setPlaybackBall(null);
@@ -405,17 +653,9 @@ function App() {
           <p className="brief">
             {level
               ? level.brief
-              : "Generate a local level, record player movement and passes, then play the sequence out."}
+            : "Generate a local level, record player movement and passes, then play the sequence out."}
           </p>
         </div>
-        <button
-          className="primary-action"
-          onClick={() => loadLevel()}
-          disabled={loadingLevel || Boolean(playbackPlayers)}
-        >
-          <CircleDot size={18} />
-          {loadingLevel ? "Generating" : level ? "New Level" : "Generate Level"}
-        </button>
       </section>
 
       <section className="game-layout">
@@ -489,26 +729,31 @@ function App() {
               />
             ))}
 
-            {arrows.map((arrow, index) => (
-              <line
-                key={`${arrow.type}-${index}`}
-                x1={arrow.from.x}
-                y1={arrow.from.y}
-                x2={arrow.to.x}
-                y2={arrow.to.y}
-                className={`sequence-arrow ${arrow.type === "shot" ? "shot-arrow" : ""}`}
-                markerEnd="url(#arrowhead)"
-              />
+            {arrows.map(({ step, index }) => (
+              <g key={`${step.type}-${index}`}>
+                <path
+                  d={ballActionPath(step)}
+                  className={`sequence-arrow ${step.type === "shot" ? "shot-arrow" : ""} ${step.type === "pass" && step.kind === "lofted" ? "lofted-arrow" : ""}`}
+                  markerEnd="url(#arrowhead)"
+                />
+                {step.type === "pass" ? (
+                  <path
+                    d={ballActionPath(step)}
+                    className="pass-hit"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      toggleLoftedPass(index);
+                    }}
+                  />
+                ) : null}
+              </g>
             ))}
 
             {activeStep &&
             (activeStep.type === "pass" || activeStep.type === "shot") ? (
-              <line
-                x1={activeStep.from.x}
-                y1={activeStep.from.y}
-                x2={activeStep.to.x}
-                y2={activeStep.to.y}
-                className="active-arrow"
+              <path
+                d={ballActionPath(activeStep)}
+                className={`active-arrow ${activeStep.type === "pass" && activeStep.kind === "lofted" ? "lofted-arrow" : ""}`}
                 markerEnd="url(#arrowhead)"
               />
             ) : null}
@@ -527,7 +772,7 @@ function App() {
             {visiblePlayers.map((player) => (
               <g
                 key={player.id}
-                className={`player-group ${player.team} ${selectedPlayerId === player.id ? "selected" : ""}`}
+                className={`player-group ${player.team} ${pendingAction?.type !== "pass" && selectedPlayerId === player.id ? "selected" : ""}`}
                 onClick={(event) => {
                   event.stopPropagation();
                   choosePlayer(player);
@@ -536,12 +781,12 @@ function App() {
                 <circle
                   cx={player.x}
                   cy={player.y}
-                  r="3.2"
+                  r="2.75"
                   className="player-ring"
                 />
                 <text
                   x={player.x}
-                  y={player.y + 1.1}
+                  y={player.y + 0.9}
                   textAnchor="middle"
                   className="player-label"
                 >
@@ -555,7 +800,7 @@ function App() {
                 cx={ballPosition.x + 2.9}
                 cy={ballPosition.y - 3.2}
                 r="1.25"
-                className="ball"
+                className={`ball ${pendingAction?.type === "pass" ? "selected" : ""}`}
                 onClick={(event) => {
                   event.stopPropagation();
                   beginPass();
@@ -569,6 +814,9 @@ function App() {
             <div className={`result-overlay ${result.scored ? "scored" : "missed"}`}>
               <strong>{result.scored ? "Goal scored" : "Chance missed"}</strong>
               <p>{result.reason}</p>
+              {!result.scored ? (
+                <p className="score-line">Score: {score}</p>
+              ) : null}
               <div className="result-actions">
                 <button
                   onClick={() => {
@@ -579,7 +827,7 @@ function App() {
                   <RotateCcw size={18} />
                   Restart
                 </button>
-                {level ? (
+                {result.scored && level ? (
                   <button
                     className="primary-action"
                     onClick={() => loadLevel(level, sequence)}
@@ -589,14 +837,93 @@ function App() {
                     Next Level
                   </button>
                 ) : null}
+                {!result.scored ? (
+                  <button
+                    className="primary-action"
+                    onClick={() => setShareOpen((current) => !current)}
+                  >
+                    <Share2 size={18} />
+                    Share
+                  </button>
+                ) : null}
               </div>
+              {!result.scored && shareOpen ? (
+                <div className="share-actions">
+                  <a
+                    href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(shareText())}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <Send size={16} />
+                    Twitter
+                  </a>
+                  <a href={`sms:?&body=${encodeURIComponent(shareText())}`}>
+                    <MessageCircle size={16} />
+                    Messages
+                  </a>
+                  <a
+                    href={`fb-messenger://share?link=${encodeURIComponent(shareUrl)}`}
+                  >
+                    <MessageCircle size={16} />
+                    Messenger
+                  </a>
+                  <button onClick={copyShareText}>
+                    <Copy size={16} />
+                    Copy
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {!result && shareOpen ? (
+            <div className="result-overlay share-overlay">
+              <strong>Score: {score}</strong>
+              <p>{shareText()}</p>
+              <div className="share-actions">
+                <a
+                  href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(shareText())}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <Send size={16} />
+                  Twitter
+                </a>
+                <a href={`sms:?&body=${encodeURIComponent(shareText())}`}>
+                  <MessageCircle size={16} />
+                  Messages
+                </a>
+                <a
+                  href={`fb-messenger://share?link=${encodeURIComponent(shareUrl)}`}
+                >
+                  <MessageCircle size={16} />
+                  Messenger
+                </a>
+                <button onClick={copyShareText}>
+                  <Copy size={16} />
+                  Copy
+                </button>
+              </div>
+              <button onClick={() => setShareOpen(false)}>Close</button>
             </div>
           ) : null}
         </div>
 
         <aside className="side-panel">
-          <div className="meta-row">
-            <span>Difficulty {level?.difficulty ?? "-"}</span>
+          <div className="generation-panel">
+            <button
+              className="primary-action"
+              onClick={startNewGame}
+              disabled={loadingLevel || Boolean(playbackPlayers)}
+            >
+              <CircleDot size={18} />
+              {loadingLevel ? "Generating" : level ? "New Level" : "Generate Level"}
+            </button>
+            <p
+              className="generation-status"
+              title={loadingLevel ? "Generating level..." : generationStatus}
+            >
+              {loadingLevel ? "Generating level..." : generationStatus}
+            </p>
           </div>
 
           <div className="controls">
@@ -615,14 +942,22 @@ function App() {
               Restart
             </button>
             <button
-              className="primary-action"
+              className="primary-action play-action"
               onClick={playSequence}
               disabled={
                 !level || sequence.length === 0 || Boolean(playbackPlayers)
               }
             >
               <Play size={18} />
-              Confirm
+              Play
+            </button>
+            <button
+              className="score-action"
+              onClick={() => setShareOpen(true)}
+              disabled={Boolean(playbackPlayers)}
+            >
+              <Share2 size={18} />
+              Score: {score}
             </button>
           </div>
 
@@ -658,6 +993,9 @@ function describeStep(step: Step, players: Player[]) {
     return `${nameFor(step.playerId, players)} runs into position`;
   }
   if (step.type === "pass") {
+    if (step.kind === "lofted") {
+      return `${nameFor(step.fromPlayerId, players)} clips it into space for ${nameFor(step.toPlayerId, players)}`;
+    }
     return `${nameFor(step.fromPlayerId, players)} passes to ${nameFor(step.toPlayerId, players)}`;
   }
   return `${nameFor(step.fromPlayerId, players)} shoots`;
@@ -678,9 +1016,22 @@ function instructionText(pendingAction: PendingAction | null) {
     return "Click a spot on the pitch to move the selected player there. That run is added as the next timeline step.";
   }
   if (pendingAction?.type === "pass") {
-    return "Click a blue teammate to pass, or click the goal to shoot. The action is added next in the timeline.";
+    return "Click a blue teammate to pass, or the goal to shoot. Click a completed pass line to toggle it into a lob.";
   }
-  return "Click a blue player to start a movement, or click the ball to start a pass. The order you click creates the timeline.";
+  return "Click a blue player to start a movement, or click the ball to start a pass. After recording a pass, click on its line to switch between ground (default) and lob.";
+}
+
+function generationStatusText(data: LevelResponse) {
+  const displayName = data.modelName ?? data.model;
+  if (data.source === "fallback") {
+    return `Fallback. ${displayName} failed${data.warning ? ` with reason: ${data.warning}` : "."}`;
+  }
+
+  const seconds =
+    !data.buffered && typeof data.durationMs === "number"
+      ? ` in ${(data.durationMs / 1000).toFixed(1)}s`
+      : "";
+  return `Generated by ${displayName}${seconds}`;
 }
 
 function StepIcon({ type }: { type: Step["type"] }) {
@@ -696,16 +1047,16 @@ function StepIcon({ type }: { type: Step["type"] }) {
 function withDefenderRatings(level: Level): Level {
   const players = [...level.players];
   if (!players.some((player) => player.team === "away" && isGoalkeeper(player))) {
-    players.push({
-      id: "a0",
-      name: "GK",
-      team: "away",
-      x: 96,
-      y: 50,
-      speed: 54,
-      reaction: 90,
-      mistake: 0.06,
-    });
+      players.push({
+        id: "a0",
+        name: "GK",
+        team: "away",
+        x: 96,
+        y: 50,
+        speed: 43,
+        reaction: 77,
+        mistake: 0.12,
+      });
   }
 
   return {
@@ -779,16 +1130,15 @@ function evaluateSequence(sequence: Step[], players: Player[]) {
     .filter((player) => {
       if (
         player.team !== "away" ||
+        isGoalkeeper(player) ||
         player.x <= finalShot.from.x ||
         player.x >= 97
       ) {
         return false;
       }
 
-      return (
-        distanceToSegment(player, finalShot.from, finalShot.to) <
-        blockRadius(player)
-      );
+      const laneDistance = distanceToSegment(player, finalShot.from, finalShot.to);
+      return laneDistance < blockRadius(player);
     })
     .sort((a, b) => defenderComposite(b) - defenderComposite(a));
 
@@ -879,27 +1229,205 @@ function defenderComposite(player: Player) {
   return ((speed + reaction) / 2) * (1 - mistake);
 }
 
+function movementDuration(from: Point, to: Point) {
+  return clamp(distance(from, to) / playerRunSpeed, 0.25, 3.2);
+}
+
+function passDuration(step: PassStep) {
+  const speed = step.kind === "lofted" ? loftedPassSpeed : groundPassSpeed;
+  return clamp(distance(step.from, step.to) / speed, 0.18, 1.8);
+}
+
+function secondsToMs(seconds: number) {
+  return clamp(seconds * 1450, 320, 2900);
+}
+
+function playersAtTime(
+  players: Player[],
+  activeRuns: ActiveRun[],
+  time: number,
+) {
+  return players.map((player) => {
+    if (player.team !== "home") {
+      return player;
+    }
+
+    const position = playerPositionAt(player.id, players, activeRuns, time);
+    return { ...player, ...position };
+  });
+}
+
+function playerPositionAt(
+  playerId: string,
+  players: Player[],
+  activeRuns: ActiveRun[],
+  time: number,
+) {
+  const base = players.find((player) => player.id === playerId);
+  const run = [...activeRuns]
+    .reverse()
+    .find((candidate) => candidate.playerId === playerId);
+  if (!run) {
+    return base ? { x: base.x, y: base.y } : { x: 50, y: 50 };
+  }
+
+  const progress = clamp((time - run.startTime) / run.duration, 0, 1);
+  return {
+    x: lerp(run.from.x, run.to.x, progress),
+    y: lerp(run.from.y, run.to.y, progress),
+  };
+}
+
+function settleCompletedRuns(activeRuns: ActiveRun[], time: number) {
+  for (let index = activeRuns.length - 1; index >= 0; index -= 1) {
+    const run = activeRuns[index];
+    if (time >= run.startTime + run.duration) {
+      activeRuns.splice(index, 1);
+    }
+  }
+}
+
 function blockRadius(player: Player) {
   return 2.6 + (defenderComposite(player) / 100) * 5.2;
 }
 
+function tackleRadius(player: Player) {
+  return 1.9 + (defenderComposite(player) / 100) * 3.2;
+}
+
+function passInterceptionRadius(player: Player, kind: PassStep["kind"]) {
+  const base = 2.2 + (defenderComposite(player) / 100) * 4.2;
+  return kind === "lofted" ? base * 0.42 : base;
+}
+
+function findRunTackle(
+  activeRuns: ActiveRun[],
+  players: Player[],
+  fromTime: number,
+  toTime: number,
+): RunTackle | undefined {
+  return activeRuns
+    .flatMap((run) => {
+      const startProgress = clamp((fromTime - run.startTime) / run.duration, 0, 1);
+      const endProgress = clamp((toTime - run.startTime) / run.duration, 0, 1);
+      if (endProgress <= startProgress) {
+        return [];
+      }
+
+      return players
+        .filter((player) => player.team === "away" && !isGoalkeeper(player))
+        .map((defender) => {
+          const progress = segmentProgress(defender, run.from, run.to);
+          if (progress < Math.max(0.06, startProgress) || progress > Math.min(0.96, endProgress)) {
+            return null;
+          }
+
+          const point = projectToSegment(defender, run.from, run.to);
+          if (distance(defender, point) > tackleRadius(defender)) {
+            return null;
+          }
+
+          return {
+            runnerId: run.playerId,
+            defender,
+            point,
+            time: run.startTime + run.duration * progress,
+          };
+        })
+        .filter((tackle): tackle is RunTackle => Boolean(tackle));
+    })
+    .sort((left, right) => {
+      const timeGap = left.time - right.time;
+      return Math.abs(timeGap) > 0.05
+        ? timeGap
+        : defenderComposite(right.defender) - defenderComposite(left.defender);
+    })[0];
+}
+
+function findPassInterception(step: PassStep, players: Player[]) {
+  return players
+    .filter((player) => {
+      if (player.team !== "away" || isGoalkeeper(player)) {
+        return false;
+      }
+
+      const progress = segmentProgress(player, step.from, step.to);
+      if (progress < 0.12 || progress > 0.9) {
+        return false;
+      }
+
+      return (
+        distanceToSegment(player, step.from, step.to) <
+        passInterceptionRadius(player, step.kind)
+      );
+    })
+    .map((player) => ({
+      player,
+      progress: segmentProgress(player, step.from, step.to),
+      point: projectToSegment(player, step.from, step.to),
+    }))
+    .sort((left, right) => {
+      const scoreGap =
+        defenderComposite(right.player) - defenderComposite(left.player);
+      return Math.abs(scoreGap) > 6 ? scoreGap : left.progress - right.progress;
+    })[0];
+}
+
+function ballActionPath(step: PassStep | ShotStep) {
+  if (step.type === "pass" && step.kind === "lofted") {
+    const midX = (step.from.x + step.to.x) / 2;
+    const midY = (step.from.y + step.to.y) / 2;
+    const lift = clamp(distance(step.from, step.to) * 0.28, 6, 14);
+    return `M ${step.from.x} ${step.from.y} Q ${midX} ${midY - lift} ${step.to.x} ${step.to.y}`;
+  }
+
+  return `M ${step.from.x} ${step.from.y} L ${step.to.x} ${step.to.y}`;
+}
+
+function loftedPoint(start: Point, end: Point, progress: number, kind?: PassStep["kind"]) {
+  if (kind !== "lofted") {
+    return {
+      x: lerp(start.x, end.x, progress),
+      y: lerp(start.y, end.y, progress),
+    };
+  }
+
+  const arc = Math.sin(progress * Math.PI) * 7;
+  return {
+    x: lerp(start.x, end.x, progress),
+    y: lerp(start.y, end.y, progress) - arc,
+  };
+}
+
+function distance(a: Point, b: Point) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
 function distanceToSegment(point: Point, start: Point, end: Point) {
+  const projection = projectToSegment(point, start, end);
+  return Math.hypot(point.x - projection.x, point.y - projection.y);
+}
+
+function segmentProgress(point: Point, start: Point, end: Point) {
   const lengthSquared = (end.x - start.x) ** 2 + (end.y - start.y) ** 2;
   if (lengthSquared === 0) {
-    return Math.hypot(point.x - start.x, point.y - start.y);
+    return 0;
   }
-  const progress = clamp(
+  return clamp(
     ((point.x - start.x) * (end.x - start.x) +
       (point.y - start.y) * (end.y - start.y)) /
       lengthSquared,
     0,
     1,
   );
-  const projection = {
+}
+
+function projectToSegment(point: Point, start: Point, end: Point) {
+  const progress = segmentProgress(point, start, end);
+  return {
     x: start.x + progress * (end.x - start.x),
     y: start.y + progress * (end.y - start.y),
   };
-  return Math.hypot(point.x - projection.x, point.y - projection.y);
 }
 
 function animate(update: (progress: number) => void, duration = 650) {
